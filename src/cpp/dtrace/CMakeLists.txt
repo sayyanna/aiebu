@@ -38,9 +38,10 @@ add_library(dtrace_library_objects OBJECT
   ${AIEBU_SOURCE_DIR}/src/cpp/tools/dwarf_reader.cpp
   )
 
-target_include_directories(dtrace_library_objects 
+target_include_directories(dtrace_library_objects
   PRIVATE
   ${AIEBU_SOURCE_DIR}/src/cpp
+  ${AIEBU_SOURCE_DIR}/src/cpp/include
   ${Boost_INCLUDE_DIRS}
   )
 

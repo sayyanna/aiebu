@@ -6,8 +6,8 @@ project(dtrace_test)
 set(DTRACE_TESTNAME "dtrace_test")
 
 add_executable(${DTRACE_TESTNAME} dtrace_test.cpp)
-add_dependencies(${DTRACE_TESTNAME} cert_dtrace_static)
-target_link_libraries(${DTRACE_TESTNAME} PRIVATE cert_dtrace_static)
+add_dependencies(${DTRACE_TESTNAME} cert_dtrace_static aiebu_static)
+target_link_libraries(${DTRACE_TESTNAME} PRIVATE cert_dtrace_static aiebu_static)
 target_include_directories(${DTRACE_TESTNAME} PRIVATE
   ${AIEBU_SOURCE_DIR}/src/cpp
   ${AIEBU_ELFIO_SRC_DIR})
@@ -240,8 +240,8 @@ set_tests_properties("dtrace_elf_no_kernel_md5sum" PROPERTIES DEPENDS "dtrace_el
 # It is a multi-graph ELF (DPU kernel, 29 subgraph instances) with DWARF v5
 # .debug_* sections. Filtered to kernel instance "DPU:subgraph_0",
 # jprobe target: control.asm:uc0:line5.
-# The result script is verified against gold_result_dwarf.py; operation="" is
-# expected since DWARF .debug_line does not store instruction mnemonics.
+# The result script is verified against gold_result_dwarf.py; operation is
+# decoded via ISA binary walk (format_operation) and matches the lowercased mnemonic.
 
 # Generate multi-graph-dwarf.elf from source (avoids storing a large binary in the repo)
 add_test(NAME "dtrace_generate_dwarf_elf"
@@ -266,7 +266,7 @@ add_test(NAME "dtrace_dwarf_elf"
 set_tests_properties("dtrace_dwarf_elf" PROPERTIES DEPENDS "dtrace_generate_dwarf_elf")
 
 # Verify the DWARF result script matches the expected gold.
-# operation="" is expected: DWARF .debug_line does not store instruction mnemonics.
+# operation is decoded from the ISA binary via format_operation (lowercased mnemonic + args).
 add_test(NAME "dtrace_dwarf_elf_result_compare"
   COMMAND ${CMAKE_COMMAND} -E compare_files --ignore-eol
     "${CMAKE_CURRENT_BINARY_DIR}/control_buffer_dwarf_elf.py"

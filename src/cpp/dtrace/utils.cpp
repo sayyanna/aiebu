@@ -2,10 +2,12 @@
 // Copyright (C) 2025-2026 Advanced Micro Devices, Inc. All rights reserved.
 
 #include "utils.h"
+#include "aiebu/aiebu_debug.h"
 #include "tools/dwarf_reader.h"
 
 #include <cctype>
 #include <iostream>
+#include <map>
 #include <sstream>
 #include <string_view>
 
@@ -188,18 +190,37 @@ get_filtered_section_indices(const std::string& filter_kernel,
 // from the rows decoded by dwarf_reader.  The parser expects:
 //
 //   { "debug": [
-//       { "file": "path", "operation": "", "page_index": "N", "page_offset": "N",
+//       { "file": "path", "operation": "start_job 0", "page_index": "N", "page_offset": "N",
 //         "column": "N", "line": "N" },          ← line rows (line > 0)
 //       { ..., "annotation": { "id": "X" } },    ← annotation rows (annotation_id set)
 //       ...
 //   ]}
 //
-// "operation" is left empty: DWARF .debug_line does not store instruction text.
-// "page_offset" is the raw byte offset within the page (not the absolute address).
-static std::string dwarf_rows_to_json(const std::vector<aiebu::dwarf_debug_row>& rows)
+// "operation" is decoded via ISA binary walk (format_operation) so that the
+// dtrace `operation` built-in variable is populated with the real mnemonic.
+// "page_offset" is the absolute byte offset from the start of the .ctrltext section
+// (page_index * PAGE_SIZE + relative_offset), matching the .dump convention.
+// The dtrace parser subtracts page_index * page_size to recover the relative offset.
+static std::string dwarf_rows_to_json(const std::vector<aiebu::dwarf_debug_row>& rows,
+                                      const ELFIO::elfio& elf,
+                                      const std::string& kernel_instance)
 {
   if (rows.empty())
     return {};
+
+  // Decode operations once per unique address to avoid redundant ISA walks.
+  // resolve_group_name_id() is called once; format_operation() once per address.
+  const aiebu::AIEDebug aie_debug(elf);
+  const uint32_t name_id = aie_debug.resolve_group_name_id(kernel_instance);
+  std::map<uint32_t, std::string> addr_to_op;
+  for (const auto& row : rows) {
+    if (row.line == 0)
+      continue; // annotation rows share address with their enclosing line row
+    if (addr_to_op.find(row.address) == addr_to_op.end())
+      addr_to_op.emplace(row.address,
+                         aie_debug.format_operation(name_id, row.column,
+                                                    row.page_index, row.page_offset));
+  }
 
   // Build JSON manually to avoid pulling in nlohmann or boost::json here.
   std::ostringstream out;
@@ -210,10 +231,13 @@ static std::string dwarf_rows_to_json(const std::vector<aiebu::dwarf_debug_row>&
       out << ',';
     first = false;
 
+    const auto op_it = addr_to_op.find(row.address);
+    const std::string op = (op_it != addr_to_op.end()) ? op_it->second : std::string{};
+
     out << R"({"file":")" << row.file << '"'
-        << R"(,"operation":"")"
+        << R"(,"operation":")" << op << '"'
         << R"(,"page_index":")" << row.page_index << '"'
-        << R"(,"page_offset":")" << row.page_offset << '"'
+        << R"(,"page_offset":")" << row.address << '"'
         << R"(,"column":")" << row.column << '"';
 
     if (row.line > 0)
@@ -347,7 +371,7 @@ get_debug_section_json(const std::string& kernel_instance_filter) const
                    << "' has multiple instances; specify 'kernel:instance' for dtrace");
     }
   }
-  return dwarf_rows_to_json(filtered);
+  return dwarf_rows_to_json(filtered, m_elf, kernel_instance_filter);
 }
 
 //-------------------------strip-------------------------//
