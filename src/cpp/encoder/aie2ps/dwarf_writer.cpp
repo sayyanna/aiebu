@@ -449,7 +449,7 @@ dwarf_writer::build_info(
   // DW_TAG_compile_unit
   append_uleb128(dies, ABBREV_COMPILE_UNIT);
   append_u32(dies, producer_off);   // DW_AT_producer DW_FORM_strp
-  append_u16(dies, DW_LANG_Mips_Assembler);  // DW_AT_language DW_FORM_data2
+  append_u16(dies, DW_LANG_Assembly);        // DW_AT_language DW_FORM_data2
   append_u32(dies, cu_name_off);    // DW_AT_name     DW_FORM_strp
 
   // One DW_TAG_module per column

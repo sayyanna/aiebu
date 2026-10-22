@@ -341,7 +341,7 @@ parse_dwarf_rows(const ELFIO::elfio& elf,
     if (row.line == 0)
       continue;  // annotation-only row — no source line
 
-    // Filter by instance: cu_name is "kernel:instance"; compare suffix in-place.
+    // Filter by instance: cu_name is "KernelName:instance"; compare suffix in-place.
     const size_t delim = row.cu_name.find(':');
     if (delim == std::string::npos ||
         row.cu_name.compare(delim + 1, std::string::npos, inst_name) != 0)

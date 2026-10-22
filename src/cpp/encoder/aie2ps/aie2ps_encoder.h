@@ -7,6 +7,7 @@
 #include <memory>
 #include <utility>
 
+#include "common/utils.h"
 #include "encoder.h"
 #include "writer.h"
 #include "aie2ps_preprocessed_output.h"
@@ -168,7 +169,7 @@ public:
           Debug dbg = encoder_object.take_debug();
           // Only include this CU if debug data was collected (dump flag was set).
           if (!dbg.get_functions_in_order().empty())
-            cu_debugs.emplace_back(kernel + ":" + iname, std::move(dbg));
+            cu_debugs.emplace_back(extract_kernel_name_from_mangled(kernel) + ":" + iname, std::move(dbg));
         }
       }
     }

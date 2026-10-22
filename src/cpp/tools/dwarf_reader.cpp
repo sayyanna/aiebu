@@ -448,7 +448,7 @@ dwarf_reader::parse_line_table(
     uint32_t reg_file = 0;
     int32_t  reg_line = 1;
 
-    // Template row: column and cu_name are constant for this column/CU — set once.
+    // Template row: column and cu_name are constant for this CU — set once.
     dwarf_debug_row row_tmpl{};
     row_tmpl.column  = col_num;
     row_tmpl.cu_name = cu_name;
@@ -634,7 +634,7 @@ dwarf_reader::find_row(uint32_t col, uint32_t page_idx, uint32_t offset,
     if (row.column != col || row.page_index != page_idx || row.page_offset != offset)
       continue;
     if (!filter_instance.empty()) {
-      // cu_name format: "kernel:instance" — match instance suffix
+      // cu_name format: "KernelName:instance" — match instance suffix
       const auto colon = row.cu_name.find(':');
       if (colon == std::string::npos ||
           row.cu_name.compare(colon + 1, std::string::npos, filter_instance) != 0)
