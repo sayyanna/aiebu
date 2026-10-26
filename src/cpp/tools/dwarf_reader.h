@@ -25,13 +25,18 @@ struct dwarf_debug_row {
   uint32_t    column;           ///< Column number from "column N" DW_TAG_module
   uint32_t    page_index;       ///< address >> 13
   uint32_t    page_offset;      ///< address & 0x1FFF (byte offset within page)
-  uint32_t    address;          ///< Raw DWARF address (page_index*PAGE_SIZE + page_offset)
+  uint32_t    address;          ///< Code address: page_index*PAGE_SIZE + page_offset.
+                                ///< For DW_TAG_variable rows this is DW_AT_low_pc (instruction address).
+  uint32_t    data_address;     ///< For DW_TAG_variable rows: data address from DW_AT_location
+                                ///< (the BD descriptor / patch table the instruction references).
+                                ///< Zero for DW_TAG_label rows and line rows.
   uint32_t    line;             ///< Source line number
   std::string file;             ///< Source file name (basename from prologue table)
-  std::string annotation_name; ///< DW_AT_name from DW_TAG_label or DW_TAG_variable DIE (empty if none)
+  std::string data_label_name; ///< DW_AT_name from DW_TAG_variable DIE — BD label name (e.g. "UCBD_label_uc0"); empty for label/line rows
+  std::string annotation_name; ///< Annotation probe name: DW_AT_name (DW_TAG_label) or DW_AT_description (DW_TAG_variable)
   std::string annotation_id;   ///< DW_AT_const_value (annotation id string) from annotated DIE (empty if none)
-  std::string annotation_desc; ///< DW_AT_description from annotated DIE (empty if none)
-  std::string cu_name;          ///< DW_AT_name of the enclosing compile_unit (e.g. "DPU:subgraph_0")
+  std::string annotation_desc; ///< DW_AT_description from DW_TAG_label DIE (empty for variable/line rows)
+  uint32_t    cu_name_idx = UINT32_MAX; ///< Index into dwarf_reader::m_cu_names; use cu_name_of() to resolve
 };
 
 /**
@@ -73,11 +78,23 @@ public:
   /// All decoded rows, in statement-list order.
   const std::vector<dwarf_debug_row>& get_all_rows() const { return m_rows; }
 
+  /**
+   * Resolve the CU name for a row returned by get_all_rows() or find_row().
+   * Returns a stable reference into the intern table — valid for the lifetime
+   * of this dwarf_reader.  Returns an empty string if cu_name_idx is UINT32_MAX.
+   */
+  const std::string& cu_name_of(const dwarf_debug_row& row) const;
+
 private:
   static constexpr uint32_t PAGE_SIZE = 0x2000; ///< 8 KiB per page
 
   bool m_has_dwarf = false;
   std::vector<dwarf_debug_row> m_rows;
+  std::vector<std::string> m_cu_names; ///< Intern table: unique CU names (small set — one per subgraph)
+
+  // Intern a CU name string, returning a stable index into m_cu_names.
+  // Idempotent: same string always returns the same index.
+  uint32_t intern_cu_name(const std::string& name);
 
   // ── Parse helpers ────────────────────────────────────────────────────────
   static const uint8_t* read_u8 (const uint8_t* p, uint8_t&  v);
@@ -107,10 +124,10 @@ private:
   //            can safely loop.  If the buffer is too small, info_remaining is
   //            set to 0 to stop the loop.
   // Fills m_rows with annotation entries; fills cols_out with (col_num, stmt_offset) pairs.
-  // Returns the DW_AT_name of the compile_unit (e.g. "DPU:subgraph_0"), or
-  // empty string on error (caller skips this CU but may continue the loop).
+  // Returns the intern index of the CU's DW_AT_name (e.g. "DPU:subgraph_0"), or
+  // UINT32_MAX on error (caller skips this CU but may continue the loop).
   // The .debug_abbrev section is not parsed: the fixed schema emitted by dwarf_writer is assumed.
-  std::string parse_debug_info(
+  uint32_t parse_debug_info(
       const uint8_t*& p_info,   size_t& info_remaining,
       const uint8_t*  str_data, size_t  str_size,
       std::vector<col_info>& cols_out);
@@ -121,7 +138,7 @@ private:
       size_t stmt_offset,
       uint32_t col_num,
       const uint8_t* str_data, size_t str_size,
-      const std::string& cu_name);
+      uint32_t cu_name_idx);
 
   // Read a strp (4-byte offset into .debug_str)
   static std::string read_strp(const uint8_t* p, const uint8_t* str_data, size_t str_size);

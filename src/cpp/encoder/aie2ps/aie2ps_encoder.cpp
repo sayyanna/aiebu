@@ -214,10 +214,14 @@ page_writer(page& lpage, std::map<std::string, std::shared_ptr<scratchpad_info>>
 
   textwriter->write_bytes(page_header);
 
-  // text_base is the position of the first text instruction in textwriter (= 16)
+  // text_base is the byte offset of the first text instruction within the merged
+  // page buffer (= 16, after the page header).  Used to convert a label's
+  // pre-scanned position (header-excluded) to the correct DWARF address:
+  //   data_dwarf_addr = pagenum * PAGE_SIZE + text_base + label_pos
   offset_type text_base = textwriter->tell();
   std::vector<symbol> tsym;
   std::string fid;
+
   for (const auto& text : lpage.m_text)
   {
     const std::string& name = text->get_operation().get_name();
@@ -232,17 +236,34 @@ page_writer(page& lpage, std::map<std::string, std::shared_ptr<scratchpad_info>>
         fid = m_debug.add_function(text->get_file_idx(), name + "_" + page_state->gen_job_name(false, text, 0), pc_high, pc_low, colnum, pagenum);
       }
       pc_high = pc_low + (*m_isa)[name]->serializer(args)->size(*page_state) - 1;
-      // Classify annotated instructions: data-referencing opcodes emit DW_TAG_variable;
-      // all others (NOP, START_JOB, WAIT_TCTS, ...) emit DW_TAG_label.
-      // New opcodes default safely to DW_TAG_label.
+      // Resolve the data operand address for annotated data-referencing instructions.
+      // The ISA definition declares which runtime arg (PAD-stripped) holds the
+      // data-section label via get_data_label_arg_index().  -1 means the opcode
+      // is not data-referencing and should be emitted as DW_TAG_label.
+      // create_assembler_state() pre-scans text+data in one pass so all label
+      // positions are in m_labelmap before this loop runs — no deferred fixup needed.
+      // get_label_pos() consults only m_labelmap (not scratchpad) so it returns
+      // the correct page-relative byte position, not a hardware address.
+      // data_dwarf_addr = pagenum*PAGE_SIZE + text_base + label_pos
+      //   text_base accounts for the 16-byte page header.
       const int ann_idx = text->get_annotation_index();
+      offset_type data_addr = 0;
+      std::string label_name;
       if (ann_idx != -1) {
-        if (name == "apply_offset_57" ||
-            name == "uc_dma_write_des_sync" ||
-            name == "uc_dma_write_des")
-          m_debug.mark_annotation_variable(ann_idx);
+        const int data_label_arg = (*m_isa)[name]->get_data_label_arg_index();
+        if (data_label_arg >= 0 && data_label_arg < static_cast<int>(args.size())) {
+          const std::string& raw_arg = args[static_cast<size_t>(data_label_arg)];
+          label_name = raw_arg.substr(1); // strip leading '@', e.g. "UCBD_label_uc0"
+          uint32_t label_pos = 0;
+          if (page_state->get_label_pos(label_name, label_pos)) {
+            data_addr = static_cast<offset_type>(pagenum) * PAGE_SIZE + text_base + label_pos;
+            m_debug.mark_annotation_variable(ann_idx);
+          } else {
+            label_name.clear(); // not a data-section label; emit as DW_TAG_label with no BD name
+          }
+        }
       }
-      m_debug.add_textline(fid, text->get_linenumber(), pc_high, pc_low, text->get_line(), ann_idx);
+      m_debug.add_textline(fid, text->get_linenumber(), pc_high, pc_low, text->get_line(), ann_idx, data_addr, std::move(label_name));
     }
 
     if (text->isOpcode())

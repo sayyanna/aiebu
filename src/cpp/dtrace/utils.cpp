@@ -8,8 +8,10 @@
 #include <cctype>
 #include <iostream>
 #include <map>
+#include <set>
 #include <sstream>
 #include <string_view>
+#include <utility>
 
 namespace dtrace {
 
@@ -208,43 +210,57 @@ static std::string dwarf_rows_to_json(const std::vector<aiebu::dwarf_debug_row>&
   if (rows.empty())
     return {};
 
-  // Decode operations once per unique address to avoid redundant ISA walks.
-  // resolve_group_name_id() is called once; format_operation() once per address.
+  // Decode operations once per unique (column, address) pair to avoid redundant
+  // ISA walks. Column is part of the key because DWARF addresses (page*PAGE_SIZE
+  // + offset) are only unique within a single control column.
+  // resolve_group_name_id() is called once; format_operation() once per pair.
   const aiebu::AIEDebug aie_debug(elf);
   const uint32_t name_id = aie_debug.resolve_group_name_id(kernel_instance);
-  std::map<uint32_t, std::string> addr_to_op;
+  std::map<std::pair<uint32_t, uint32_t>, std::string> addr_to_op; // {col, addr} → op
+  // Annotation rows (line == 0) share their address with a co-located line row.
+  // Build a lookup so the annotation id can be merged into the line row's JSON
+  // entry — matching the .dump convention that the dtrace parser expects.
+  std::map<std::pair<uint32_t, uint32_t>, std::string> addr_to_ann; // {col, addr} → id
   for (const auto& row : rows) {
-    if (row.line == 0)
+    if (row.line == 0) {
+      if (!row.annotation_id.empty())
+        addr_to_ann.emplace(std::make_pair(row.column, row.address), row.annotation_id);
       continue; // annotation rows share address with their enclosing line row
-    if (addr_to_op.find(row.address) == addr_to_op.end())
-      addr_to_op.emplace(row.address,
+    }
+    const auto cache_key = std::make_pair(row.column, row.address);
+    if (addr_to_op.find(cache_key) == addr_to_op.end())
+      addr_to_op.emplace(cache_key,
                          aie_debug.format_operation(name_id, row.column,
                                                     row.page_index, row.page_offset));
   }
 
   // Build JSON manually to avoid pulling in nlohmann or boost::json here.
+  // Annotation-only rows (line == 0) are suppressed; their annotation_id is
+  // merged into the co-located line row instead, matching the .dump format.
   std::ostringstream out;
   out << R"({"debug":[)";
   bool first = true;
   for (const auto& row : rows) {
+    if (row.line == 0)
+      continue; // merged into co-located line row below
+
     if (!first)
       out << ',';
     first = false;
 
-    const auto op_it = addr_to_op.find(row.address);
+    const auto op_it = addr_to_op.find({row.column, row.address});
     const std::string op = (op_it != addr_to_op.end()) ? op_it->second : std::string{};
 
     out << R"({"file":")" << row.file << '"'
         << R"(,"operation":")" << op << '"'
         << R"(,"page_index":")" << row.page_index << '"'
         << R"(,"page_offset":")" << row.address << '"'
-        << R"(,"column":")" << row.column << '"';
+        << R"(,"column":")" << row.column << '"'
+        << R"(,"line":")" << row.line << '"';
 
-    if (row.line > 0)
-      out << R"(,"line":")" << row.line << '"';
-
-    if (!row.annotation_id.empty())
-      out << R"(,"annotation":{"id":")" << row.annotation_id << R"("})";
+    const auto ann_it = addr_to_ann.find({row.column, row.address});
+    if (ann_it != addr_to_ann.end())
+      out << R"(,"annotation":{"id":")" << ann_it->second << R"("})";
 
     out << '}';
   }
@@ -342,35 +358,47 @@ get_debug_section_json(const std::string& kernel_instance_filter) const
   // Filter rows to those whose CU name matches this kernel(:instance).
   // CU names are stored as "mangled_kernel:instance" (e.g. "_Z3DPUPcPcPcPc:subgraph_0");
   // we demangle the kernel prefix for comparison.
-  // When no instance is specified, accept the first instance but error out
-  // if a second one is found — empty instance is not allowed for multi-instance kernels.
+  //
+  // First pass: determine the matching CU name indices — O(unique CUs), not O(rows).
+  // Demangling and substr are only called once per unique CU name, avoiding
+  // repeated work when many rows share the same CU name (e.g. 29-subgraph ELFs).
+  // The intern index (uint32_t) is used as the set key to avoid string copies.
+  std::set<uint32_t> matching_cu_indices;
+  std::set<uint32_t> seen_cu_indices;   // tracks which indices have already been evaluated
   std::string first_instance;
-  std::vector<aiebu::dwarf_debug_row> filtered;
   for (const auto& row : reader.get_all_rows()) {
-    const size_t cu_delim = row.cu_name.find(':');
+    if (row.cu_name_idx == UINT32_MAX) continue;
+    if (!seen_cu_indices.insert(row.cu_name_idx).second)
+      continue; // already evaluated this CU index
+    const std::string& cu_name = reader.cu_name_of(row);
+    const size_t cu_delim = cu_name.find(':');
     if (cu_delim == std::string::npos) continue;
-    const std::string cu_kernel   = row.cu_name.substr(0, cu_delim);
-    const std::string cu_instance = row.cu_name.substr(cu_delim + 1);
+    const std::string cu_kernel   = cu_name.substr(0, cu_delim);
+    const std::string cu_instance = cu_name.substr(cu_delim + 1);
     const std::string demangled   = extract_kernel_name_from_mangled(cu_kernel);
-    const bool kernel_match = (demangled == filter_kernel) || (cu_kernel == filter_kernel);
-    if (!kernel_match)
+    if (demangled != filter_kernel && cu_kernel != filter_kernel)
       continue;
     if (!filter_instance.empty()) {
       if (cu_instance == filter_instance)
-        filtered.push_back(row);
+        matching_cu_indices.insert(row.cu_name_idx);
       continue;
     }
-    // filter_instance is empty: accept first matching instance, error on second distinct one
+    // No instance specified: accept first matching instance, error on second distinct
     if (first_instance.empty()) {
       first_instance = cu_instance;
-      filtered.push_back(row);
-    } else if (first_instance == cu_instance) {
-      filtered.push_back(row);
-    } else {
+      matching_cu_indices.insert(row.cu_name_idx);
+    } else if (cu_instance != first_instance) {
       DTRACE_ERROR("DTRACE_KERNEL_INSTANCE_FILTER_FAILED", "kernel '" << filter_kernel
                    << "' has multiple instances; specify 'kernel:instance' for dtrace");
     }
   }
+
+  // Second pass: collect all rows from matching CUs (integer set lookup per row).
+  std::vector<aiebu::dwarf_debug_row> filtered;
+  for (const auto& row : reader.get_all_rows())
+    if (matching_cu_indices.count(row.cu_name_idx))
+      filtered.push_back(row);
+
   return dwarf_rows_to_json(filtered, m_elf, kernel_instance_filter);
 }
 

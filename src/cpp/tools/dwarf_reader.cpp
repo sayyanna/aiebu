@@ -5,7 +5,7 @@
 //
 // Only the subset of DWARF v5 produced by dwarf_writer.cpp is handled:
 //   - 32-bit DWARF format, address_size=4
-//   - Fixed abbreviation codes 1 (compile_unit), 2 (module), 3 (label)
+//   - Fixed abbreviation codes 1 (compile_unit), 2 (module), 3 (variable), 4 (label)
 //   - DW_FORM_strp (4-byte offset into .debug_str)
 //   - DW_FORM_sec_offset (4-byte)
 //   - DW_FORM_data2, DW_FORM_data4, DW_FORM_addr (4-byte)
@@ -22,14 +22,6 @@
 namespace aiebu {
 
 using namespace dwarf5;
-
-// ─── LEB128 encoding constants ───────────────────────────────────────────────
-
-static constexpr uint8_t  LEB128_VALUE_MASK  = 0x7F;
-static constexpr uint8_t  LEB128_MORE_BIT    = 0x80;
-static constexpr uint8_t  LEB128_SIGN_BIT    = 0x40;
-static constexpr unsigned LEB128_SHIFT       = 7;
-static constexpr unsigned LEB128_MAX_SHIFT   = 64U; // bits in int64_t
 
 // Minimum byte counts for DWARF v5 headers (used as guard checks before parsing).
 // CU header:   unit_length(4) + version(2) + unit_type(1) + addr_size(1) + abbrev_off(4) = 12,
@@ -128,6 +120,25 @@ dwarf_reader::get_section_data_by_index(const ELFIO::elfio& elf, size_t index)
   return {nullptr, 0};
 }
 
+// ─── CU name intern table ────────────────────────────────────────────────────
+
+uint32_t dwarf_reader::intern_cu_name(const std::string& name)
+{
+  for (uint32_t i = 0; i < static_cast<uint32_t>(m_cu_names.size()); ++i)
+    if (m_cu_names[i] == name)
+      return i;
+  m_cu_names.push_back(name);
+  return static_cast<uint32_t>(m_cu_names.size() - 1);
+}
+
+const std::string& dwarf_reader::cu_name_of(const dwarf_debug_row& row) const
+{
+  static const std::string s_empty;
+  if (row.cu_name_idx == UINT32_MAX || row.cu_name_idx >= m_cu_names.size())
+    return s_empty;
+  return m_cu_names[row.cu_name_idx];
+}
+
 // ─── .debug_info parser ──────────────────────────────────────────────────────
 
 // We parse the fixed abbreviation table inline rather than reading the actual
@@ -148,18 +159,19 @@ static size_t form_fixed_size(uint64_t form)
   }
 }
 
-std::string
+uint32_t
 dwarf_reader::parse_debug_info(
     const uint8_t*& p_info,   size_t& info_remaining,
     const uint8_t*  str_data, size_t  str_size,
     std::vector<col_info>& cols_out)
 {
   std::string cu_name_result;
+  uint32_t cu_name_idx = UINT32_MAX;
   const uint8_t* p = p_info;
 
   if (info_remaining < CU_HEADER_MIN_SIZE) {
     info_remaining = 0;
-    return cu_name_result;
+    return cu_name_idx;
   }
 
   // Parse DWARF v5 CU header — read unit_length first so we can advance
@@ -173,7 +185,7 @@ dwarf_reader::parse_debug_info(
   const size_t cu_total = 4 + static_cast<size_t>(unit_length); // length field + body
   if (cu_total > info_remaining) {
     info_remaining = 0;
-    return cu_name_result;
+    return cu_name_idx;
   }
   p_info         += cu_total;
   info_remaining -= cu_total;
@@ -183,48 +195,74 @@ dwarf_reader::parse_debug_info(
   uint16_t version = 0;
   p = read_u16(p, version);
   if (version != DWARF_VERSION)
-    return cu_name_result;
+    return cu_name_idx;
 
   uint8_t unit_type = 0;
   p = read_u8(p, unit_type);
   if (unit_type != DW_UT_compile)
-    return cu_name_result; // Only compile units supported
+    return cu_name_idx; // Only compile units supported
   uint8_t addr_size = 0;
   p = read_u8(p, addr_size);
   p += 4; // abbrev_offset — skip (.debug_abbrev not parsed; fixed schema assumed)
 
   if (addr_size != DWARF_ADDR_SIZE)
-    return cu_name_result; // Only support 32-bit addresses
+    return cu_name_idx; // Only support 32-bit addresses
 
   // We now parse DIEs using our fixed abbreviation knowledge:
   //   abbrev 1 = compile_unit (has_children): producer(strp), language(data2), name(strp)
   //   abbrev 2 = module       (has_children): name(strp), stmt_list(sec_offset), byte_size(data4)
-  //   abbrev 3 = variable     (no_children):  name(strp), location(exprloc: DW_OP_addr+addr4),
-  //                                           const_value(strp), description(strp)
-  //   abbrev 4 = label        (no_children):  name(strp), low_pc(addr),
-  //                                           const_value(strp), description(strp)
+  //   abbrev 3 = variable     (no_children):  name(strp) [BD label name],
+  //                                           location(exprloc: DW_OP_addr+addr4), low_pc(addr),
+  //                                           const_value(strp) [ann id], description(strp) [ann name]
+  //   abbrev 4 = label        (no_children):  name(strp) [ann name], low_pc(addr),
+  //                                           const_value(strp) [ann id], description(strp) [ann desc]
 
   // Current DW_TAG_module state
   uint32_t cur_col  = UINT32_MAX;
   uint32_t cur_stmt = 0;
 
-  // Helper: push an annotation row to m_rows (used by cases 3 and 4).
-  // compile_unit DIE (abbrev 1) always precedes module/annotation DIEs, so
-  // cu_name_result is set before any annotation DIE is encountered.
-  auto push_annotation_row = [&](uint32_t addr,
-                                 std::string ann_name,
-                                 std::string ann_id,
-                                 std::string ann_desc) {
+  // Helpers: push an annotation row to m_rows (compile_unit DIE always
+  // precedes module/annotation DIEs per DWARF spec, so cu_name_idx is
+  // always interned before either helper is called).
+  //
+  // push_variable_row — DW_TAG_variable: data-referencing instruction.
+  //   code_addr: instruction address for dtrace probe matching.
+  //   data_addr: address of the referenced BD descriptor / patch table (DW_AT_location).
+  auto push_variable_row = [&](uint32_t code_addr, uint32_t data_addr,
+                                std::string label_name,
+                                std::string ann_name,
+                                std::string ann_id) {
+    if (cur_col == UINT32_MAX) return;
+    dwarf_debug_row row{};
+    row.column           = cur_col;
+    row.address          = code_addr;
+    row.page_index       = code_addr / DWARF_PAGE_SIZE;
+    row.page_offset      = code_addr % DWARF_PAGE_SIZE;
+    row.data_address     = data_addr;
+    row.data_label_name  = std::move(label_name);  // DW_AT_name  (BD label, spec-correct for variable)
+    row.annotation_name  = std::move(ann_name);    // DW_AT_description (annotation probe name)
+    row.annotation_id    = std::move(ann_id);      // DW_AT_const_value
+    row.cu_name_idx      = cu_name_idx;
+    m_rows.emplace_back(std::move(row));
+  };
+
+  // push_label_row — DW_TAG_label: code-position probe point.
+  //   code_addr: instruction address (DW_AT_low_pc); no data address.
+  //   ann_name comes from DW_AT_name; ann_desc from DW_AT_description (stored in annotation_desc).
+  auto push_label_row = [&](uint32_t code_addr,
+                             std::string ann_name,
+                             std::string ann_id,
+                             std::string ann_desc) {
     if (cur_col == UINT32_MAX) return;
     dwarf_debug_row row{};
     row.column          = cur_col;
-    row.address         = addr;
-    row.page_index      = addr / DWARF_PAGE_SIZE;
-    row.page_offset     = addr % DWARF_PAGE_SIZE;
+    row.address         = code_addr;
+    row.page_index      = code_addr / DWARF_PAGE_SIZE;
+    row.page_offset     = code_addr % DWARF_PAGE_SIZE;
     row.annotation_name = std::move(ann_name);
     row.annotation_id   = std::move(ann_id);
     row.annotation_desc = std::move(ann_desc);
-    row.cu_name         = cu_name_result;
+    row.cu_name_idx     = cu_name_idx;
     m_rows.emplace_back(std::move(row));
   };
 
@@ -244,16 +282,17 @@ dwarf_reader::parse_debug_info(
     switch (abbrev_code) {
       case 1: { // compile_unit: producer(strp) language(data2) name(strp)
         if (p + 4 + 2 + 4 > cu_end)
-          return cu_name_result;
+          return cu_name_idx;
         p += 4; // producer — skip
         p += 2; // language — skip
         cu_name_result = read_strp(p, str_data, str_size);
+        cu_name_idx    = intern_cu_name(cu_name_result);
         p += 4; // name
         break;
       }
       case 2: { // module
         if (p + 4 + 4 + 4 > cu_end)
-          return cu_name_result; // name(strp) + stmt_list(sec_offset) + byte_size(data4)
+          return cu_name_idx; // name(strp) + stmt_list(sec_offset) + byte_size(data4)
         // name(strp)
         std::string mod_name = read_strp(p, str_data, str_size);
         p += 4;
@@ -268,57 +307,60 @@ dwarf_reader::parse_debug_info(
         if (mod_name.size() > COLUMN_PREFIX_LEN &&
             mod_name.compare(0, COLUMN_PREFIX_LEN, COLUMN_PREFIX) == 0) {
           try {
-            col_num = static_cast<uint32_t>(std::stoul(mod_name.substr(COLUMN_PREFIX_LEN)));
+            col_num = static_cast<uint32_t>(std::stoul(mod_name.c_str() + COLUMN_PREFIX_LEN));
           } catch (...) {}
         }
         cur_col  = col_num;
         cur_stmt = stmt_list;
         break;
       }
-      case 3: { // variable — annotated instruction
-        // name(strp) + location(exprloc) + const_value(strp) + description(strp)
-        // Minimum: 4(name) + 1(exprloc_len) + 1(DW_OP_addr) + 4(addr4) + 4(id) + 4(desc) = 18
-        if (p + 4 + 1 + 1 + 4 + 4 + 4 > cu_end)
-          return cu_name_result;
-        std::string ann_name = read_strp(p, str_data, str_size); p += 4;
-        // DW_AT_location as exprloc: ULEB128 length, then DW_OP_addr + 4-byte address
+      case 3: { // variable — annotated data-referencing instruction
+        // name(strp) [BD label] + location(exprloc) + low_pc(addr) + const_value(strp) [ann id] + description(strp) [ann name]
+        // Minimum: 4(name) + 1(exprloc_len) + 1(DW_OP_addr) + 4(data_addr) + 4(low_pc) + 4(id) + 4(desc) = 22
+        if (p + 4 + 1 + 1 + 4 + 4 + 4 + 4 > cu_end)
+          return cu_name_idx;
+        std::string label_name = read_strp(p, str_data, str_size); p += 4; // DW_AT_name — BD label name
+        // DW_AT_location as exprloc: ULEB128 length, then DW_OP_addr + 4-byte data address
+        // (address of the BD descriptor / patch table the instruction references)
         uint64_t loc_len = 0;
         p = read_uleb128(p, cu_end, loc_len);
         if (p + static_cast<size_t>(loc_len) > cu_end)
-          return cu_name_result;
-        // DW_OP_addr expression: 1 opcode byte + 4-byte address
-        uint32_t addr = 0;
+          return cu_name_idx;
+        uint32_t data_addr = 0;
         if (loc_len >= dwarf5::DW_OP_ADDR_EXPR_SIZE) {
-          p += 1;                                                                            // skip DW_OP_addr byte
-          p = read_u32(p, addr);
-          p += static_cast<size_t>(loc_len - dwarf5::DW_OP_ADDR_EXPR_SIZE);  // skip any trailing bytes (none expected)
+          p += 1;                        // skip DW_OP_addr opcode byte
+          p = read_u32(p, data_addr);
+          p += static_cast<size_t>(loc_len - dwarf5::DW_OP_ADDR_EXPR_SIZE);
         } else {
-          p += static_cast<size_t>(loc_len);                               // skip malformed expression
+          p += static_cast<size_t>(loc_len);
         }
-        std::string ann_id   = read_strp(p, str_data, str_size); p += 4;
-        std::string ann_desc = read_strp(p, str_data, str_size); p += 4;
-        push_annotation_row(addr, std::move(ann_name), std::move(ann_id), std::move(ann_desc));
+        // DW_AT_low_pc: code address of the annotated instruction, used for dtrace probing
+        uint32_t code_addr = 0;
+        p = read_u32(p, code_addr);
+        std::string ann_id   = read_strp(p, str_data, str_size); p += 4; // DW_AT_const_value — annotation id
+        std::string ann_name = read_strp(p, str_data, str_size); p += 4; // DW_AT_description — annotation name
+        push_variable_row(code_addr, data_addr, std::move(label_name), std::move(ann_name), std::move(ann_id));
         break;
       }
       case 4: { // label — code-position probe point
         // name(strp) + low_pc(addr) + const_value(strp) + description(strp)
         if (p + 4 + 4 + 4 + 4 > cu_end)
-          return cu_name_result;
+          return cu_name_idx;
         std::string ann_name = read_strp(p, str_data, str_size); p += 4;
         uint32_t addr = 0;
         p = read_u32(p, addr);           // DW_AT_low_pc DW_FORM_addr
         std::string ann_id   = read_strp(p, str_data, str_size); p += 4;
         std::string ann_desc = read_strp(p, str_data, str_size); p += 4;
-        push_annotation_row(addr, std::move(ann_name), std::move(ann_id), std::move(ann_desc));
+        push_label_row(addr, std::move(ann_name), std::move(ann_id), std::move(ann_desc));
         break;
       }
       default:
         // Unknown DIE — we cannot safely skip; stop parsing
-        return cu_name_result;
+        return cu_name_idx;
     }
   }
 
-  return cu_name_result;
+  return cu_name_idx;
 }
 
 // ─── .debug_line interpreter ─────────────────────────────────────────────────
@@ -329,7 +371,7 @@ dwarf_reader::parse_line_table(
     size_t stmt_offset,
     uint32_t col_num,
     const uint8_t* str_data, size_t str_size,
-    const std::string& cu_name)
+    uint32_t cu_name_idx)
 {
   if (stmt_offset >= line_size)
     return;
@@ -448,10 +490,10 @@ dwarf_reader::parse_line_table(
     uint32_t reg_file = 0;
     int32_t  reg_line = 1;
 
-    // Template row: column and cu_name are constant for this CU — set once.
+    // Template row: column and cu_name_idx are constant for this CU — set once.
     dwarf_debug_row row_tmpl{};
-    row_tmpl.column  = col_num;
-    row_tmpl.cu_name = cu_name;
+    row_tmpl.column      = col_num;
+    row_tmpl.cu_name_idx = cu_name_idx;
 
     auto emit_row = [&]() {
       dwarf_debug_row row = row_tmpl;
@@ -600,16 +642,16 @@ dwarf_reader::dwarf_reader(const ELFIO::elfio& elf)
 
   while (info_remaining > 0) {
     std::vector<col_info> cols;
-    const std::string cu_name = parse_debug_info(p_info, info_remaining,
-                                                  str_data, str_size, cols);
-    // cu_name is empty on error; the pointer has already been advanced past
+    const uint32_t cu_idx = parse_debug_info(p_info, info_remaining,
+                                              str_data, str_size, cols);
+    // cu_idx is UINT32_MAX on error; the pointer has already been advanced past
     // the malformed CU so we can safely try the next one.
-    if (cu_name.empty())
+    if (cu_idx == UINT32_MAX)
       continue;
 
     for (const auto& ci : cols)
       parse_line_table(line_data, line_size, ci.stmt_offset, ci.col_num,
-                       str_data, str_size, cu_name);
+                       str_data, str_size, cu_idx);
   }
 
   m_has_dwarf = !m_rows.empty();
@@ -630,19 +672,27 @@ dwarf_reader::find_row(uint32_t col, uint32_t page_idx, uint32_t offset,
       filter_instance = kernel_name.substr(colon + 1);
   }
 
+  // Scan all rows keeping the best match. Line rows (line > 0) carry file/line
+  // info and are preferred over annotation DIE rows (line == 0) at the same
+  // address. DIE rows are inserted into m_rows before line rows during parsing,
+  // so a plain first-match return would wrongly return the DIE row.
+  dwarf_debug_row best{};
   for (const auto& row : m_rows) {
     if (row.column != col || row.page_index != page_idx || row.page_offset != offset)
       continue;
     if (!filter_instance.empty()) {
       // cu_name format: "KernelName:instance" — match instance suffix
-      const auto colon = row.cu_name.find(':');
+      const std::string& cu = cu_name_of(row);
+      const auto colon = cu.find(':');
       if (colon == std::string::npos ||
-          row.cu_name.compare(colon + 1, std::string::npos, filter_instance) != 0)
+          cu.compare(colon + 1, std::string::npos, filter_instance) != 0)
         continue;
     }
-    return row;
+    best = row;
+    if (row.line > 0)
+      break; // line row has file/line info — no better match possible
   }
-  return {};
+  return best;
 }
 
 } // namespace aiebu

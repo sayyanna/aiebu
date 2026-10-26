@@ -12,8 +12,10 @@
 #include <algorithm>
 #include <cctype>
 #include <filesystem>
+#include <map>
 #include <sstream>
 #include <string>
+#include <utility>
 
 namespace aiebu {
 
@@ -50,9 +52,10 @@ write_trace_probes_from_dwarf(std::ostream& stream, const dwarf_reader& dr,
   std::vector<const dwarf_debug_row*> all_rows;
   for (const auto& row : dr.get_all_rows()) {
     if (!filter_instance.empty()) {
-      const auto cu_colon = row.cu_name.find(':');
+      const std::string& cu = dr.cu_name_of(row);
+      const auto cu_colon = cu.find(':');
       if (cu_colon == std::string::npos ||
-          row.cu_name.compare(cu_colon + 1, std::string::npos, filter_instance) != 0)
+          cu.compare(cu_colon + 1, std::string::npos, filter_instance) != 0)
         continue;
     }
     all_rows.push_back(&row);
@@ -88,20 +91,24 @@ write_trace_probes_from_dwarf(std::ostream& stream, const dwarf_reader& dr,
       it->second.conflict = true;
   }
 
-  // Build address → {display_file, operation} maps in one pass over line rows.
-  // Annotation rows (Pass 3) share the same address as their enclosing line row,
-  // so caching here avoids a redundant ISA binary walk per annotation probe.
-  std::map<uint32_t, std::string> addr_to_display;
-  std::map<uint32_t, std::string> addr_to_op;
+  // Build {column, address} → {display_file, operation} maps in one pass over
+  // line rows. Column is part of the key because DWARF addresses are only unique
+  // within a single control column. Annotation rows (Pass 3) share the same
+  // (column, address) as their enclosing line row, so caching avoids a redundant
+  // ISA binary walk per annotation probe.
+  using col_addr = std::pair<uint32_t, uint32_t>; // {column, address}
+  std::map<col_addr, std::string> addr_to_display;
+  std::map<col_addr, std::string> addr_to_op;
   for (const auto* row : all_rows) {
     if (row->line == 0)
       continue;
+    const col_addr ca{row->column, row->address};
     const std::string file_name = std::filesystem::path(row->file).filename().string();
     const std::string key = file_name + ":uc" + std::to_string(row->column);
     const bool has_conflict = tracking_map.at(key).conflict;
-    addr_to_display.emplace(row->address, has_conflict ? row->file : file_name);
-    if (addr_to_op.find(row->address) == addr_to_op.end())
-      addr_to_op.emplace(row->address,
+    addr_to_display.emplace(ca, has_conflict ? row->file : file_name);
+    if (addr_to_op.find(ca) == addr_to_op.end())
+      addr_to_op.emplace(ca,
                          aie_debug.format_operation(name_id, row->column,
                                                     row->page_index, row->page_offset));
   }
@@ -110,8 +117,9 @@ write_trace_probes_from_dwarf(std::ostream& stream, const dwarf_reader& dr,
   for (const auto* row : all_rows) {
     if (row->line == 0)
       continue;
-    const std::string& display_file = addr_to_display.at(row->address);
-    const std::string& op           = addr_to_op.at(row->address);
+    const col_addr ca{row->column, row->address};
+    const std::string& display_file = addr_to_display.at(ca);
+    const std::string& op           = addr_to_op.at(ca);
 
     stream << "jprobe:" << display_file
            << ":uc"     << row->column
@@ -121,16 +129,18 @@ write_trace_probes_from_dwarf(std::ostream& stream, const dwarf_reader& dr,
 
   // Pass 3: emit annotation probes from DW_TAG_label rows (line == 0).
   // Resolve display_file and operation from the maps built above; both are
-  // keyed by address and annotation rows always share an address with a line row.
+  // keyed by {column, address} and annotation rows always share both with their
+  // enclosing line row.
   for (const auto* row : all_rows) {
     if (row->annotation_id.empty())
       continue; // only annotation rows have this set
 
-    const auto disp_it = addr_to_display.find(row->address);
+    const col_addr ca{row->column, row->address};
+    const auto disp_it = addr_to_display.find(ca);
     const std::string display_file =
         (disp_it != addr_to_display.end()) ? disp_it->second : std::to_string(row->address);
 
-    const auto op_it = addr_to_op.find(row->address);
+    const auto op_it = addr_to_op.find(ca);
     const std::string op = (op_it != addr_to_op.end()) ? op_it->second : std::string{};
 
     stream << "jprobe:" << display_file

@@ -97,9 +97,17 @@ inline constexpr uint8_t DW_LNCT_directory_index = 0x02;
 
 // ── DW_OP_addr expression size ────────────────────────────────────────────
 // A DW_OP_addr location expression is: 1 opcode byte + 4-byte address = 5 bytes.
-// Used in DW_AT_location exprloc for DW_TAG_variable DIEs (writer)
-// and when decoding DW_AT_location in DW_TAG_label DIEs (reader).
+// Used when emitting DW_AT_location on DW_TAG_variable DIEs (writer)
+// and when decoding it in the reader.
 inline constexpr uint32_t DW_OP_ADDR_EXPR_SIZE = 5;
+
+// ── LEB128 encoding constants (DWARF §7.6) ───────────────────────────────────
+// Shared by dwarf_writer and dwarf_reader — defined once here to avoid drift.
+inline constexpr uint8_t  LEB128_VALUE_MASK = 0x7F;  // low 7 bits of each LEB128 byte
+inline constexpr uint8_t  LEB128_MORE_BIT   = 0x80;  // continuation bit
+inline constexpr uint8_t  LEB128_SIGN_BIT   = 0x40;  // sign bit of last group (SLEB128)
+inline constexpr unsigned LEB128_SHIFT      = 7;      // bits per LEB128 group
+inline constexpr unsigned LEB128_MAX_SHIFT  = 64U;    // total bits in int64_t (SLEB128 sign extension)
 
 } // namespace aiebu::dwarf5
 

@@ -72,14 +72,6 @@ static constexpr uint8_t ABBREV_MODULE       = 2;
 static constexpr uint8_t ABBREV_VARIABLE     = 3;  // DW_TAG_variable — data-referencing instruction
 static constexpr uint8_t ABBREV_LABEL        = 4;  // DW_TAG_label    — code-position probe point
 
-// ─── LEB128 encoding constants ──────────────────────────────────────────────
-
-static constexpr uint8_t  LEB128_VALUE_MASK = 0x7F; // low 7 bits of each byte
-static constexpr uint8_t  LEB128_MORE_BIT   = 0x80; // continuation bit
-static constexpr uint8_t  LEB128_SIGN_BIT   = 0x40; // sign bit of last group
-static constexpr unsigned LEB128_SHIFT      = 7;    // bits per LEB128 group
-
-
 // ─── Little-endian write helpers ────────────────────────────────────────────
 
 void dwarf_writer::append_u8(std::vector<uint8_t>& buf, uint8_t v)
@@ -168,10 +160,11 @@ uint32_t dwarf_writer::intern_str(std::vector<uint8_t>& str_buf,
 //     DW_AT_stmt_list DW_FORM_sec_offset
 //     DW_AT_byte_size DW_FORM_data4
 //   Abbrev 3: DW_TAG_variable, no_children  — data-referencing instruction
-//     DW_AT_name        DW_FORM_strp     — source variable name (e.g. "DMAWRITE_data_69")
-//     DW_AT_location    DW_FORM_exprloc  — DW_OP_addr + 4-byte data address
+//     DW_AT_name        DW_FORM_strp     — source variable name (e.g. "UCBD_label_0")
+//     DW_AT_location    DW_FORM_exprloc  — DW_OP_addr + 4-byte data address of the referenced BD/table
+//     DW_AT_low_pc      DW_FORM_addr     — code address of the annotated instruction (for dtrace probing)
 //     DW_AT_const_value DW_FORM_strp     — annotation id used by dtrace
-//     DW_AT_description DW_FORM_strp     — human-readable description
+//     DW_AT_description DW_FORM_strp     — annotation name (probe identity, for human inspection)
 //   Abbrev 4: DW_TAG_label, no_children   — code-position probe point
 //     DW_AT_name        DW_FORM_strp     — probe name (e.g. "nop1", "start_job")
 //     DW_AT_low_pc      DW_FORM_addr     — instruction address
@@ -201,13 +194,14 @@ std::vector<uint8_t> dwarf_writer::build_abbrev()
   append_uleb128(buf, 0); append_uleb128(buf, 0);
 
   // Abbrev 3: variable — data-referencing instruction (APPLY_OFFSET_57, UC_DMA_WRITE_DES*).
-  // Records the source variable name and data address so debuggers and dtrace can
-  // correlate binary patch locations back to source-level operand names.
+  // DW_AT_location carries the data address of the referenced BD descriptor / patch table.
+  // DW_AT_low_pc carries the code address of the instruction for dtrace probe matching.
   append_uleb128(buf, ABBREV_VARIABLE);
   append_uleb128(buf, DW_TAG_variable);
   append_u8(buf, DW_CHILDREN_no);
   append_uleb128(buf, DW_AT_name);        append_uleb128(buf, DW_FORM_strp);
   append_uleb128(buf, DW_AT_location);    append_uleb128(buf, DW_FORM_exprloc);
+  append_uleb128(buf, DW_AT_low_pc);      append_uleb128(buf, DW_FORM_addr);
   append_uleb128(buf, DW_AT_const_value); append_uleb128(buf, DW_FORM_strp);
   append_uleb128(buf, DW_AT_description); append_uleb128(buf, DW_FORM_strp);
   append_uleb128(buf, 0); append_uleb128(buf, 0);
@@ -473,14 +467,24 @@ dwarf_writer::build_info(
         const auto addr = static_cast<uint32_t>(line->get_lowpc());
 
         if (annotations[static_cast<size_t>(ann_idx)].is_variable()) {
-          // DW_TAG_variable: data address via DW_AT_location exprloc (DW_OP_addr + 4 bytes)
+          // DW_TAG_variable:
+          //   DW_AT_name     — BD label name from ASM source (e.g. "UCBD_label_uc0") — spec-correct
+          //   DW_AT_location — data address of the referenced BD descriptor / patch table
+          //   DW_AT_low_pc   — code address of the annotated instruction (for dtrace probing)
+          //   DW_AT_const_value — annotation id (used by dtrace for probe matching)
+          //   DW_AT_description — annotation name (human-readable probe identity)
+          //     Note: annotation description ≈ annotation name (same content, different punctuation)
+          //     so repurposing DW_AT_description for the annotation name loses no meaningful information.
+          const auto data_addr = static_cast<uint32_t>(line->get_data_address());
+          const uint32_t label_name_off = intern_str(str_buf, str_index, line->get_data_label_name());
           append_uleb128(dies, ABBREV_VARIABLE);
-          append_u32(dies, offs.name);   // DW_AT_name        DW_FORM_strp
+          append_u32(dies, label_name_off); // DW_AT_name        DW_FORM_strp — BD label name (spec-correct)
           append_uleb128(dies, dwarf5::DW_OP_ADDR_EXPR_SIZE);  // DW_AT_location DW_FORM_exprloc: byte count
-          append_u8(dies, DW_OP_addr);   //   location opcode
-          append_u32(dies, addr);        //   absolute data address
-          append_u32(dies, offs.id);     // DW_AT_const_value DW_FORM_strp
-          append_u32(dies, offs.desc);   // DW_AT_description DW_FORM_strp
+          append_u8(dies, DW_OP_addr);      //   location opcode
+          append_u32(dies, data_addr);      //   data address of the referenced BD / table
+          append_u32(dies, addr);           // DW_AT_low_pc      DW_FORM_addr (code address for dtrace)
+          append_u32(dies, offs.id);        // DW_AT_const_value DW_FORM_strp — annotation id
+          append_u32(dies, offs.name);      // DW_AT_description DW_FORM_strp — annotation name
         } else {
           // DW_TAG_label: code address via DW_AT_low_pc (plain addr, no expression overhead)
           append_uleb128(dies, ABBREV_LABEL);

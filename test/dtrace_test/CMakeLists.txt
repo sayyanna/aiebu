@@ -277,4 +277,51 @@ add_test(NAME "dtrace_dwarf_elf_result_compare"
 set_tests_properties("dtrace_dwarf_elf_result_compare" PROPERTIES
   DEPENDS "dtrace_dwarf_elf")
 
+# DWARF ELF multi-column dtrace test — validates that the {column, address} cache key
+# in write_trace_probes_from_dwarf() and dwarf_rows_to_json() correctly distinguishes
+# rows from different control columns (uc0, uc2, uc4).
+# ELF is generated from 3col_preempt_0hint (three .attach_to_group sections).
+# jprobes target one distinct operation per column:
+#   uc0:line7  → start_job 0
+#   uc2:line14 → nop
+#   uc4:line26 → nop
+
+add_test(NAME "dtrace_generate_dwarf_elf_multicol"
+  COMMAND aiebu-asm
+    -t aie4_config
+    -j "${AIEBU_SOURCE_DIR}/test/aie4-ctrlcode/dwarf_multicol/config.json"
+    -o "${CMAKE_CURRENT_BINARY_DIR}/dwarf_multicol.elf"
+    -f fulldump
+  WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}
+  )
+
+add_test(NAME "dtrace_dwarf_elf_multicol"
+  COMMAND ${DTRACE_TESTNAME}
+    "${AIEBU_SOURCE_DIR}/test/dtrace_test/dwarf_elf_multicol"
+    "${CMAKE_CURRENT_BINARY_DIR}/control_buffer_dwarf_multicol.dat"
+    "python"
+    "elf" "${CMAKE_CURRENT_BINARY_DIR}/dwarf_multicol.elf" "DPU:dpu"
+  WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}
+  )
+set_tests_properties("dtrace_dwarf_elf_multicol" PROPERTIES
+  DEPENDS "dtrace_generate_dwarf_elf_multicol")
+
+add_test(NAME "dtrace_dwarf_elf_multicol_md5sum"
+  COMMAND cmake -P "${AIEBU_SOURCE_DIR}/cmake/md5sum-compare.cmake"
+    "${CMAKE_CURRENT_BINARY_DIR}/control_buffer_dwarf_multicol.dat"
+    "${AIEBU_SOURCE_DIR}/test/dtrace_test/dwarf_elf_multicol/gold.md5"
+  WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}
+  )
+set_tests_properties("dtrace_dwarf_elf_multicol_md5sum" PROPERTIES
+  DEPENDS "dtrace_dwarf_elf_multicol")
+
+add_test(NAME "dtrace_dwarf_elf_multicol_result_compare"
+  COMMAND ${CMAKE_COMMAND} -E compare_files --ignore-eol
+    "${CMAKE_CURRENT_BINARY_DIR}/control_buffer_dwarf_multicol.py"
+    "${CMAKE_CURRENT_SOURCE_DIR}/dwarf_elf_multicol/gold_result_dwarf_multicol.py"
+  WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}
+  )
+set_tests_properties("dtrace_dwarf_elf_multicol_result_compare" PROPERTIES
+  DEPENDS "dtrace_dwarf_elf_multicol")
+
 add_subdirectory(duplicate_filename)

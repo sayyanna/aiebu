@@ -45,7 +45,7 @@ private:
 
   static transform_manager make_transform(
     aiebu_assembler::buffer_type type,  const std::vector<char>& buffer);
-  void get_dump_section();
+  void init_debug_sources();
 
 public:
   // Constructor

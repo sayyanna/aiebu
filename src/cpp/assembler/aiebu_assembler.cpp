@@ -330,21 +330,22 @@ opcode_byte_at_address(const ELFIO::elfio& elf,
 static void
 parse_dwarf_rows(const ELFIO::elfio& elf,
                  const std::set<ELFIO::Elf_Half>& instance_sections,
-                 const std::vector<dwarf_debug_row>& rows,
+                 const dwarf_reader& reader,
                  const std::string& inst_name,
                  uint8_t opcode,
                  aiebu_assembler::op_loc& loc)
 {
   std::map<uint32_t, size_t> col_index;
 
-  for (const auto& row : rows) {
+  for (const auto& row : reader.get_all_rows()) {
     if (row.line == 0)
       continue;  // annotation-only row — no source line
 
     // Filter by instance: cu_name is "KernelName:instance"; compare suffix in-place.
-    const size_t delim = row.cu_name.find(':');
+    const std::string& cu = reader.cu_name_of(row);
+    const size_t delim = cu.find(':');
     if (delim == std::string::npos ||
-        row.cu_name.compare(delim + 1, std::string::npos, inst_name) != 0)
+        cu.compare(delim + 1, std::string::npos, inst_name) != 0)
       continue;
 
     const int opbyte = opcode_byte_at_address(elf, instance_sections, row.column, row.address);
@@ -433,13 +434,12 @@ get_op_locations(uint8_t opcode, const std::string& kernel_name) const
     if (!any_dump) {
       const dwarf_reader reader(trans.get_elfio());
       if (reader.has_dwarf()) {
-        const auto& all_rows = reader.get_all_rows();
         for (const auto& inst_name : instances) {
           op_loc loc;
           loc.inst_name = inst_name;
           const auto inst_sections =
               trans.get_filtered_section_indices(kernel_name + ":" + inst_name);
-          parse_dwarf_rows(trans.get_elfio(), inst_sections, all_rows,
+          parse_dwarf_rows(trans.get_elfio(), inst_sections, reader,
                            inst_name, opcode, loc);
           if (!loc.line_info.empty())
             results.push_back(std::move(loc));

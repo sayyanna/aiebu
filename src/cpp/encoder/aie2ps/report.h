@@ -24,13 +24,27 @@ using json = nlohmann::json;
 // Class hold info for each line in jod/function
 class Line {
 public:
-  Line(uint32_t linenumber, offset_type high_pc, offset_type low_pc, const std::string& opcode, int annotation_index)
-      : m_linenumber(linenumber), m_highpc(high_pc), m_lowpc(low_pc), m_opcode(opcode), m_annotation_index(annotation_index) {}
+  // data_addr: address of the BD descriptor / patch table referenced by the
+  // instruction (non-zero only for DW_TAG_variable annotations).  Zero for
+  // all other lines and for DW_TAG_label annotations.
+  Line(uint32_t linenumber, offset_type high_pc, offset_type low_pc, const std::string& opcode,
+       int annotation_index, offset_type data_addr = 0, std::string label_name = {})
+      : m_linenumber(linenumber), m_highpc(high_pc), m_lowpc(low_pc), m_opcode(opcode),
+        m_annotation_index(annotation_index), m_data_address(data_addr),
+        m_data_label_name(std::move(label_name)) {}
 
   uint32_t get_linenumber() const { return m_linenumber; }
   offset_type get_lowpc() const { return m_lowpc; }
   offset_type get_highpc() const { return m_highpc; }
   int get_annotation_index() const { return m_annotation_index; }
+
+  // Address of the BD descriptor / patch table the annotated instruction references.
+  // Non-zero only for DW_TAG_variable rows; zero for all other rows.
+  offset_type get_data_address() const { return m_data_address; }
+
+  // Source-level name of the data-section label (e.g. "UCBD_label_uc0").
+  // Non-empty only for DW_TAG_variable rows; empty for all other rows.
+  const std::string& get_data_label_name() const { return m_data_label_name; }
 
   // Writes JSON directly to out, avoiding a per-line heap allocation.
   void write_json(std::ostream& out, int sno, uint32_t column, pageid_type page_num,
@@ -59,6 +73,8 @@ private:
   offset_type m_lowpc;
   std::string m_opcode;
   int m_annotation_index;
+  offset_type m_data_address;
+  std::string m_data_label_name;  // BD label name (e.g. "UCBD_label_uc0"); empty for non-variable rows
 };
 
 // Class hold info for each job/function
@@ -116,8 +132,13 @@ public:
     return key;
   }
 
-  void add_textline(const std::string& func, uint32_t line, offset_type hi, offset_type lo, const std::string& opcode, int ann) {
-    functions.at(func)->add_textline(std::make_shared<Line>(line, hi, lo, opcode, ann));
+  // data_addr: non-zero for DW_TAG_variable annotations (data-referencing instructions);
+  // zero for all other lines and for DW_TAG_label annotations.
+  void add_textline(const std::string& func, uint32_t line, offset_type hi, offset_type lo,
+                    const std::string& opcode, int ann, offset_type data_addr = 0,
+                    std::string label_name = {}) {
+    functions.at(func)->add_textline(
+        std::make_shared<Line>(line, hi, lo, opcode, ann, data_addr, std::move(label_name)));
   }
 
   void add_dataline(const std::string& func, uint32_t line, offset_type hi, offset_type lo, const std::string& opcode, int ann) {
