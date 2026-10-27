@@ -5,6 +5,7 @@
 #define _ADSM_OPS_ISA_OP_H_
 
 #include <memory>
+#include <utility>
 #include "utils.h"
 #include "oparg.h"
 #include "assembler_state.h"
@@ -249,6 +250,7 @@ protected:
   std::string m_opname;
   uint8_t m_code;
   std::vector<opArg> m_args;
+private:
   // Index into the runtime (PAD-stripped) arg vector of the data-section label
   // that this instruction references (e.g. a BD descriptor or patch table).
   // -1 means the instruction does not reference a data-section label.
@@ -266,7 +268,7 @@ public:
 
   isa_op(std::string opname, uint8_t code, std::vector<opArg> args,
          int data_label_arg_index = -1)
-      : m_opname(opname), m_code(code), m_data_label_arg_index(data_label_arg_index) {
+      : m_opname(std::move(opname)), m_code(code), m_data_label_arg_index(data_label_arg_index) {
     for (auto a : args)
       m_args.emplace_back(a);
   }

@@ -263,7 +263,7 @@ page_writer(page& lpage, std::map<std::string, std::shared_ptr<scratchpad_info>>
           }
         }
       }
-      m_debug.add_textline(fid, text->get_linenumber(), pc_high, pc_low, text->get_line(), ann_idx, data_addr, std::move(label_name));
+      m_debug.add_textline(fid, text->get_linenumber(), pc_range{pc_high, pc_low}, text->get_line(), ann_idx, data_addr, std::move(label_name));
     }
 
     if (text->isOpcode())
@@ -294,7 +294,7 @@ page_writer(page& lpage, std::map<std::string, std::shared_ptr<scratchpad_info>>
       if (m_dump_flag == asm_dump_flag::full) {
         offset_type pc_low = pagenum * PAGE_SIZE + textwriter->tell() + datawriter->tell();
         offset_type pc_high = pc_low + (*m_isa)[name]->serializer(args)->size(*page_state) - 1;
-        m_debug.add_dataline(fid, data->get_linenumber(), pc_high, pc_low, data->get_line(), data->get_annotation_index());
+        m_debug.add_dataline(fid, data->get_linenumber(), pc_range{pc_high, pc_low}, data->get_line(), data->get_annotation_index());
       }
       std::vector<uint8_t> ret = (*m_isa)[name]->serializer(args)
                                                ->serialize(page_state, dsym, colnum, pagenum);

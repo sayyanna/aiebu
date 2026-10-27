@@ -6,6 +6,7 @@
 
 
 #include <string>
+#include <utility>
 #include <vector>
 #include <memory>
 #include <map>
@@ -21,16 +22,22 @@ namespace aiebu {
 
 using json = nlohmann::json;
 
+// PC range for a single encoded instruction: [low_pc, high_pc] (inclusive, byte offsets).
+struct pc_range {
+  offset_type high_pc = 0;
+  offset_type low_pc  = 0;
+};
+
 // Class hold info for each line in jod/function
 class Line {
 public:
   // data_addr: address of the BD descriptor / patch table referenced by the
   // instruction (non-zero only for DW_TAG_variable annotations).  Zero for
   // all other lines and for DW_TAG_label annotations.
-  Line(uint32_t linenumber, offset_type high_pc, offset_type low_pc, const std::string& opcode,
+  Line(uint32_t linenumber, pc_range range, std::string opcode,
        int annotation_index, offset_type data_addr = 0, std::string label_name = {})
-      : m_linenumber(linenumber), m_highpc(high_pc), m_lowpc(low_pc), m_opcode(opcode),
-        m_annotation_index(annotation_index), m_data_address(data_addr),
+      : m_linenumber(linenumber), m_highpc(range.high_pc), m_lowpc(range.low_pc),
+        m_opcode(std::move(opcode)), m_annotation_index(annotation_index), m_data_address(data_addr),
         m_data_label_name(std::move(label_name)) {}
 
   uint32_t get_linenumber() const { return m_linenumber; }
@@ -134,15 +141,15 @@ public:
 
   // data_addr: non-zero for DW_TAG_variable annotations (data-referencing instructions);
   // zero for all other lines and for DW_TAG_label annotations.
-  void add_textline(const std::string& func, uint32_t line, offset_type hi, offset_type lo,
+  void add_textline(const std::string& func, uint32_t line, pc_range range,
                     const std::string& opcode, int ann, offset_type data_addr = 0,
                     std::string label_name = {}) {
     functions.at(func)->add_textline(
-        std::make_shared<Line>(line, hi, lo, opcode, ann, data_addr, std::move(label_name)));
+        std::make_shared<Line>(line, range, opcode, ann, data_addr, std::move(label_name)));
   }
 
-  void add_dataline(const std::string& func, uint32_t line, offset_type hi, offset_type lo, const std::string& opcode, int ann) {
-    functions.at(func)->add_dataline(std::make_shared<Line>(line, hi, lo, opcode, ann));
+  void add_dataline(const std::string& func, uint32_t line, pc_range range, const std::string& opcode, int ann) {
+    functions.at(func)->add_dataline(std::make_shared<Line>(line, range, opcode, ann));
   }
 
   // Returns all functions in insertion order for DWARF emission.
