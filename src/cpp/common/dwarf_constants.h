@@ -65,10 +65,7 @@ inline constexpr uint8_t DW_FORM_sec_offset = 0x17;
 // ── Location expression opcodes (Table 7.9) ──────────────────────────────
 inline constexpr uint8_t DW_OP_addr = 0x03;  // followed by address_size bytes (absolute address)
 
-// ── Language codes (Table 7.17) ──────────────────────────────────────────
-// DW_LANG_Assembly (0x9001) is the DWARF v5 standard language code for
-// assembly-language compilation units (Table 7.17, DWARF v5 spec).
-inline constexpr uint16_t DW_LANG_Assembly = 0x9001;
+inline constexpr uint16_t DW_LANG_Assembly = 0x0031;
 
 // ── Standard line-number opcodes (Table 7.22) ────────────────────────────
 inline constexpr uint8_t DW_LNS_copy              = 0x01;

@@ -30,6 +30,9 @@ static constexpr size_t CU_HEADER_MIN_SIZE   = 11;
 // Line table:  total_length(4) + version(2) + addr_size(1) + seg_size(1) + hdr_length(4) = 12,
 //              but we check 10 to detect the length + version fields.
 static constexpr size_t LINE_HEADER_MIN_SIZE = 10;
+// Six fixed prologue bytes that follow header_length:
+// min_inst_len(1) + max_ops_inst(1) + default_is_stmt(1) + line_base(1) + line_range(1) + opcode_base(1)
+static constexpr size_t LINE_PROLOGUE_FIXED_SIZE = 6;
 
 // ─── Raw-read helpers ────────────────────────────────────────────────────────
 
@@ -61,6 +64,10 @@ const uint8_t* dwarf_reader::read_uleb128(const uint8_t* p, const uint8_t* end, 
     shift += LEB128_SHIFT;
     if ((byte & LEB128_MORE_BIT) == 0)
       break;
+    // A valid ULEB128 for a uint64_t needs at most 10 bytes (10×7=70 bits).
+    // Break before the next iteration would accumulate with shift>=64 (UB).
+    if (shift >= LEB128_MAX_SHIFT)
+      break;
   }
   return p;
 }
@@ -76,8 +83,11 @@ const uint8_t* dwarf_reader::read_sleb128(const uint8_t* p, const uint8_t* end, 
     shift += LEB128_SHIFT;
     if ((byte & LEB128_MORE_BIT) == 0)
       break;
+    // Same bound as read_uleb128.
+    if (shift >= LEB128_MAX_SHIFT)
+      break;
   }
-  // Sign extend
+  // Sign extend: only valid when shift < 64; skip if we broke on malformed input.
   if (shift < LEB128_MAX_SHIFT && (byte & LEB128_SIGN_BIT) != 0)
     v |= -(static_cast<int64_t>(1) << shift);
   return p;
@@ -93,7 +103,8 @@ const uint8_t* dwarf_reader::read_cstr(const uint8_t* p, const uint8_t* end, std
   return (nul < end) ? nul + 1 : end;
 }
 
-std::string dwarf_reader::read_strp(const uint8_t* p, const uint8_t* str_data, size_t str_size)
+std::string dwarf_reader::read_strp(const uint8_t* p,
+                                     const uint8_t* str_data, size_t str_size)
 {
   uint32_t offset = 0;
   read_u32(p, offset);
@@ -334,6 +345,10 @@ dwarf_reader::parse_debug_info(
         } else {
           p += static_cast<size_t>(loc_len);
         }
+        // Re-verify that the fixed suffix (low_pc + const_value + description = 12 bytes)
+        // is still available after skipping the exprloc body.
+        if (p + 4 + 4 + 4 > cu_end)
+          return cu_name_idx;
         // DW_AT_low_pc: code address of the annotated instruction, used for dtrace probing
         uint32_t code_addr = 0;
         p = read_u32(p, code_addr);
@@ -348,7 +363,7 @@ dwarf_reader::parse_debug_info(
           return cu_name_idx;
         std::string ann_name = read_strp(p, str_data, str_size); p += 4;
         uint32_t addr = 0;
-        p = read_u32(p, addr);           // DW_AT_low_pc DW_FORM_addr
+        p = read_u32(p, addr);   // DW_AT_low_pc DW_FORM_addr
         std::string ann_id   = read_strp(p, str_data, str_size); p += 4;
         std::string ann_desc = read_strp(p, str_data, str_size); p += 4;
         push_label_row(addr, std::move(ann_name), std::move(ann_id), std::move(ann_desc));
@@ -397,12 +412,16 @@ dwarf_reader::parse_line_table(
   uint8_t addr_size = 0; p = read_u8(p, addr_size);
   p += 1; // seg_selector_size — skip (always 0 for AIEBU; not used by this consumer)
 
+  if (p + 4 > stmt_end)
+    return;
   uint32_t header_length = 0;
   p = read_u32(p, header_length);
   const uint8_t* program_start = p + header_length;
   if (program_start > stmt_end)
     return;
 
+  if (p + LINE_PROLOGUE_FIXED_SIZE > program_start)
+    return;
   uint8_t min_inst_len  = 0; p = read_u8(p, min_inst_len);
   uint8_t max_ops_inst  = 0; p = read_u8(p, max_ops_inst);
   { uint8_t tmp = 0; p = read_u8(p, tmp); (void)tmp; } // default_is_stmt — not used by this consumer
@@ -485,9 +504,9 @@ dwarf_reader::parse_line_table(
   // Run the line-number program starting at program_start
   p = program_start;
   {
-    // Line-number machine registers
+    // Line-number machine registers — initial values per DWARF v5 §6.2.2 Table 6.4.
     uint32_t reg_addr = 0;
-    uint32_t reg_file = 0;
+    uint32_t reg_file = 1; // spec initial value; writer always emits DW_LNS_set_file 0 first
     int32_t  reg_line = 1;
 
     // Template row: column and cu_name_idx are constant for this CU — set once.
@@ -522,7 +541,7 @@ dwarf_reader::parse_line_table(
           // DW_LNE_end_sequence marks the end of a sequence; it does NOT
           // represent a real instruction address and must not be emitted as
           // a source-location row (DWARF v5 spec §6.2.5.3).
-          reg_addr = 0; reg_file = 0; reg_line = 1;
+          reg_addr = 0; reg_file = 1; reg_line = 1; // reset to initial values (§6.2.2 Table 6.4)
         }
         p = ext_end; // skip entire extended opcode (including ext_op byte)
       } else if (opcode < opcode_base) {
@@ -568,6 +587,10 @@ dwarf_reader::parse_line_table(
             break;
           }
           case DW_LNS_fixed_advance_pc: {
+            if (p + 2 > stmt_end) {
+              p = stmt_end; // truncated stream — terminate the program loop
+              break;
+            }
             uint16_t advance = 0;
             p = read_u16(p, advance);
             reg_addr += advance;

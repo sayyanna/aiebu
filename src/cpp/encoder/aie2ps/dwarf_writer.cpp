@@ -28,7 +28,6 @@
 #include "common/dwarf_constants.h"
 #include "version.h"
 
-#include <algorithm>
 #include <array>
 #include <cassert>
 #include <map>
@@ -278,7 +277,9 @@ dwarf_writer::build_line_table(
 
   // Registers (line-number machine state)
   uint32_t reg_address  = 0;
-  uint32_t reg_file     = 0;
+  // Initialising reg_file to 1 (not 0) ensures that the first file (always index 0 in
+  // our 0-based v5 file table) triggers a DW_LNS_set_file 0 opcode.
+  uint32_t reg_file     = 1;
   int32_t  reg_line     = 1;
 
   // Helper: advance PC and line using special opcodes or standard ones.
@@ -298,13 +299,18 @@ dwarf_writer::build_line_table(
 
     const auto line_delta = static_cast<int32_t>(line_num - reg_line);
     const auto addr_delta = static_cast<int32_t>(addr) - static_cast<int32_t>(reg_address);
+    // Addresses within a column are always laid out sequentially by the encoder,
+    // so addr_delta must never be negative.
+    assert(addr_delta >= 0 && "line addresses within a column must be monotonically non-decreasing");
 
     // Try special opcode (encodes both address and line advance in one byte).
-    // Special opcode = (line_delta - LINE_BASE) + (addr_delta * LINE_RANGE) + OPCODE_BASE
+    // Per DWARF v5 §6.2.5.1: special = (line_delta - LINE_BASE)
+    //   + ((addr_delta / min_inst_len) * LINE_RANGE) + OPCODE_BASE
     // Valid when result fits in [OPCODE_BASE, 255].
-    const auto line_enc = static_cast<int32_t>(line_delta - LINE_BASE);
-    if (line_enc >= 0 && line_enc < static_cast<int32_t>(LINE_RANGE) && addr_delta >= 0) {
-      const auto special = static_cast<int32_t>(line_enc + (addr_delta * static_cast<int32_t>(LINE_RANGE))
+    const auto line_enc    = static_cast<int32_t>(line_delta - LINE_BASE);
+    const auto addr_ops    = addr_delta / static_cast<int32_t>(MIN_INST_LEN);
+    if (line_enc >= 0 && line_enc < static_cast<int32_t>(LINE_RANGE) && addr_ops >= 0) {
+      const auto special = static_cast<int32_t>(line_enc + (addr_ops * static_cast<int32_t>(LINE_RANGE))
                         + static_cast<int32_t>(OPCODE_BASE));
       if (special >= static_cast<int32_t>(OPCODE_BASE) && special <= static_cast<int32_t>(DWARF_MAX_SPECIAL_OPCODE)) {
         append_u8(program, static_cast<uint8_t>(special));
@@ -314,10 +320,11 @@ dwarf_writer::build_line_table(
       }
     }
 
-    // Fall back to standard opcodes
+    // Fall back to standard opcodes.
+    // DW_LNS_advance_pc operand = addr_delta / minimum_instruction_length (§6.2.5.2).
     if (addr_delta > 0) {
       append_u8(program, DW_LNS_advance_pc);
-      append_uleb128(program, static_cast<uint64_t>(addr_delta));
+      append_uleb128(program, static_cast<uint64_t>(addr_delta / static_cast<int32_t>(MIN_INST_LEN)));
       reg_address = addr;
     }
     if (line_delta != 0) {
@@ -329,6 +336,7 @@ dwarf_writer::build_line_table(
   };
 
   // Emit one row per text-section Line in each function
+  const Line* last_line = nullptr;
   for (const auto& func : col_funcs) {
     const uint32_t file_idx = intern_filename(func->get_filename());
 
@@ -342,6 +350,20 @@ dwarf_writer::build_line_table(
       if (lnum <= 0) continue;
 
       emit_row({addr, lnum, file_idx});
+      last_line = line.get();
+    }
+  }
+
+  // DWARF v5 §6.2.5.3: before DW_LNE_end_sequence the address register must
+  // equal the first byte *after* the last instruction (i.e. highpc + 1).
+  // Line::get_highpc() is the inclusive last byte of the instruction; +1 gives the exclusive end.
+  if (last_line != nullptr) {
+    const auto end_addr = static_cast<uint32_t>(last_line->get_highpc()) + 1U;
+    if (end_addr > reg_address) {
+      // DW_LNS_advance_pc operand = byte_delta / minimum_instruction_length (§6.2.5.2).
+      append_u8(program, DW_LNS_advance_pc);
+      append_uleb128(program, static_cast<uint64_t>((end_addr - reg_address) / MIN_INST_LEN));
+      reg_address = end_addr;
     }
   }
 
