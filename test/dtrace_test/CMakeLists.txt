@@ -277,51 +277,121 @@ add_test(NAME "dtrace_dwarf_elf_result_compare"
 set_tests_properties("dtrace_dwarf_elf_result_compare" PROPERTIES
   DEPENDS "dtrace_dwarf_elf")
 
-# DWARF ELF multi-column dtrace test — validates that the {column, address} cache key
+# DWARF ELF multi-column annotation dtrace test — validates that the {column, address} cache key
 # in write_trace_probes_from_dwarf() and dwarf_rows_to_json() correctly distinguishes
-# rows from different control columns (uc0, uc2, uc4).
-# ELF is generated from 3col_preempt_0hint (three .attach_to_group sections).
-# jprobes target one distinct operation per column:
-#   uc0:line7  → start_job 0
-#   uc2:line14 → nop
-#   uc4:line26 → nop
+# rows from different AIE columns (uc0 on column 0, uc2 on column 2).
+# ELF is generated from test/aie4-ctrlcode/multicol_annot_dwarf (two .attach_to_group sections).
+# jprobes target line and annotation probes on both columns:
+#   uc0:line7, uc0:annotation0, uc0:annotation1 (start_job 0 / uc_dma_write_des_sync / end_job)
+#   uc2:line7, uc2:annotation0, uc2:annotation1 (start_job 1 / uc_dma_write_des_sync / end_job)
 
-add_test(NAME "dtrace_generate_dwarf_elf_multicol"
+add_test(NAME "dtrace_generate_multicol_annot_dwarf"
   COMMAND aiebu-asm
     -t aie4_config
-    -j "${AIEBU_SOURCE_DIR}/test/aie4-ctrlcode/dwarf_multicol/config.json"
-    -o "${CMAKE_CURRENT_BINARY_DIR}/dwarf_multicol.elf"
+    -j "${AIEBU_SOURCE_DIR}/test/aie4-ctrlcode/multicol_annot_dwarf/config.json"
+    -o "${CMAKE_CURRENT_BINARY_DIR}/multicol_annot_dwarf.elf"
     -f fulldump
   WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}
   )
 
-add_test(NAME "dtrace_dwarf_elf_multicol"
+add_test(NAME "dtrace_multicol_annot_dwarf"
   COMMAND ${DTRACE_TESTNAME}
-    "${AIEBU_SOURCE_DIR}/test/dtrace_test/dwarf_elf_multicol"
-    "${CMAKE_CURRENT_BINARY_DIR}/control_buffer_dwarf_multicol.dat"
+    "${AIEBU_SOURCE_DIR}/test/dtrace_test/multicol_annot_dwarf"
+    "${CMAKE_CURRENT_BINARY_DIR}/control_buffer_multicol_annot_dwarf.dat"
     "python"
-    "elf" "${CMAKE_CURRENT_BINARY_DIR}/dwarf_multicol.elf" "DPU:dpu"
+    "elf" "${CMAKE_CURRENT_BINARY_DIR}/multicol_annot_dwarf.elf" "DPU:dpu"
   WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}
   )
-set_tests_properties("dtrace_dwarf_elf_multicol" PROPERTIES
-  DEPENDS "dtrace_generate_dwarf_elf_multicol")
+set_tests_properties("dtrace_multicol_annot_dwarf" PROPERTIES
+  DEPENDS "dtrace_generate_multicol_annot_dwarf")
 
-add_test(NAME "dtrace_dwarf_elf_multicol_md5sum"
+add_test(NAME "dtrace_multicol_annot_dwarf_md5sum"
   COMMAND cmake -P "${AIEBU_SOURCE_DIR}/cmake/md5sum-compare.cmake"
-    "${CMAKE_CURRENT_BINARY_DIR}/control_buffer_dwarf_multicol.dat"
-    "${AIEBU_SOURCE_DIR}/test/dtrace_test/dwarf_elf_multicol/gold.md5"
+    "${CMAKE_CURRENT_BINARY_DIR}/control_buffer_multicol_annot_dwarf.dat"
+    "${AIEBU_SOURCE_DIR}/test/dtrace_test/multicol_annot_dwarf/gold.md5"
   WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}
   )
-set_tests_properties("dtrace_dwarf_elf_multicol_md5sum" PROPERTIES
-  DEPENDS "dtrace_dwarf_elf_multicol")
+set_tests_properties("dtrace_multicol_annot_dwarf_md5sum" PROPERTIES
+  DEPENDS "dtrace_multicol_annot_dwarf")
 
-add_test(NAME "dtrace_dwarf_elf_multicol_result_compare"
+add_test(NAME "dtrace_multicol_annot_dwarf_result_compare"
   COMMAND ${CMAKE_COMMAND} -E compare_files --ignore-eol
-    "${CMAKE_CURRENT_BINARY_DIR}/control_buffer_dwarf_multicol.py"
-    "${CMAKE_CURRENT_SOURCE_DIR}/dwarf_elf_multicol/gold_result_dwarf_multicol.py"
+    "${CMAKE_CURRENT_BINARY_DIR}/control_buffer_multicol_annot_dwarf.py"
+    "${CMAKE_CURRENT_SOURCE_DIR}/multicol_annot_dwarf/gold_result_dwarf_multicol.py"
   WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}
   )
-set_tests_properties("dtrace_dwarf_elf_multicol_result_compare" PROPERTIES
-  DEPENDS "dtrace_dwarf_elf_multicol")
+set_tests_properties("dtrace_multicol_annot_dwarf_result_compare" PROPERTIES
+  DEPENDS "dtrace_multicol_annot_dwarf")
+
+# DWARF ELF multi-column dtrace test (aie2ps_config) — real multi-column workload
+# with 6 AIE columns (uc0, uc4, uc8, uc12, uc16, uc20) and complex script.ct exercising
+# jprobe, tracepoint, read_mem, write_mem, read_reg, mask_write_reg across columns.
+# ELF is generated from test/dtrace_test/multi_col_dwarf/Work/aiebu_config.json in-place;
+# ASM files are resolved relative to the config file by aiebu-asm.
+# Output format: json (result file: control_buffer_multi_col_dwarf.json).
+# kernel instance: DPU:dpu
+
+add_test(NAME "dtrace_generate_multi_col_dwarf"
+  COMMAND aiebu-asm
+    -t aie2ps_config
+    -j "${AIEBU_SOURCE_DIR}/test/dtrace_test/multi_col_dwarf/Work/aiebu_config.json"
+    -o "${CMAKE_CURRENT_BINARY_DIR}/multi_col_dwarf.elf"
+    -f fulldump
+  WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}
+  )
+
+add_test(NAME "dtrace_multi_col_dwarf"
+  COMMAND ${DTRACE_TESTNAME}
+    "${AIEBU_SOURCE_DIR}/test/dtrace_test/multi_col_dwarf"
+    "${CMAKE_CURRENT_BINARY_DIR}/control_buffer_multi_col_dwarf.dat"
+    "json"
+    "elf" "${CMAKE_CURRENT_BINARY_DIR}/multi_col_dwarf.elf" "DPU:dpu"
+  WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}
+  )
+set_tests_properties("dtrace_multi_col_dwarf" PROPERTIES
+  DEPENDS "dtrace_generate_multi_col_dwarf")
+
+add_test(NAME "dtrace_multi_col_dwarf_md5sum"
+  COMMAND cmake -P "${AIEBU_SOURCE_DIR}/cmake/md5sum-compare.cmake"
+    "${CMAKE_CURRENT_BINARY_DIR}/control_buffer_multi_col_dwarf.dat"
+    "${AIEBU_SOURCE_DIR}/test/dtrace_test/multi_col_dwarf/gold.md5"
+  WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}
+  )
+set_tests_properties("dtrace_multi_col_dwarf_md5sum" PROPERTIES
+  DEPENDS "dtrace_multi_col_dwarf")
+
+add_test(NAME "dtrace_multi_col_dwarf_result_compare"
+  COMMAND ${CMAKE_COMMAND} -E compare_files --ignore-eol
+    "${CMAKE_CURRENT_BINARY_DIR}/control_buffer_multi_col_dwarf.json"
+    "${CMAKE_CURRENT_SOURCE_DIR}/multi_col_dwarf/gold_result_multi_col_dwarf.json"
+  WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}
+  )
+set_tests_properties("dtrace_multi_col_dwarf_result_compare" PROPERTIES
+  DEPENDS "dtrace_multi_col_dwarf")
+
+# Validate DWARF sections of generated ELFs with llvm-dwarfdump --verify (Linux only).
+# This provides an independent check that .debug_abbrev, .debug_info, .debug_line, and
+# .debug_str are spec-compliant — something the internal dwarf_reader cannot verify since
+# it uses a hardcoded schema and does not parse .debug_abbrev at all.
+find_program(LLVM_DWARFDUMP llvm-dwarfdump)
+if (LLVM_DWARFDUMP)
+  add_test(NAME "dwarf_verify_single_instance"
+    COMMAND ${LLVM_DWARFDUMP} --verify "${CMAKE_CURRENT_BINARY_DIR}/multi-graph-dwarf.elf"
+    WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR})
+  set_tests_properties("dwarf_verify_single_instance" PROPERTIES
+    DEPENDS "dtrace_generate_dwarf_elf")
+
+  add_test(NAME "dwarf_verify_multicol_annot_dwarf"
+    COMMAND ${LLVM_DWARFDUMP} --verify "${CMAKE_CURRENT_BINARY_DIR}/multicol_annot_dwarf.elf"
+    WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR})
+  set_tests_properties("dwarf_verify_multicol_annot_dwarf" PROPERTIES
+    DEPENDS "dtrace_generate_multicol_annot_dwarf")
+
+  add_test(NAME "dwarf_verify_multi_col_dwarf"
+    COMMAND ${LLVM_DWARFDUMP} --verify "${CMAKE_CURRENT_BINARY_DIR}/multi_col_dwarf.elf"
+    WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR})
+  set_tests_properties("dwarf_verify_multi_col_dwarf" PROPERTIES
+    DEPENDS "dtrace_generate_multi_col_dwarf")
+endif()
 
 add_subdirectory(duplicate_filename)
