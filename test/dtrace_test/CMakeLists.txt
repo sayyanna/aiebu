@@ -249,7 +249,6 @@ add_test(NAME "dtrace_generate_dwarf_elf"
     -t aie4_config
     -j "${AIEBU_SOURCE_DIR}/test/aie4-ctrlcode/multi_graph/config.json"
     -o "${CMAKE_CURRENT_BINARY_DIR}/multi-graph-dwarf.elf"
-    -f fulldump
   WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}
   )
 
@@ -336,7 +335,6 @@ add_test(NAME "dtrace_generate_multi_col_dwarf"
     -t aie2ps_config
     -j "${AIEBU_SOURCE_DIR}/test/dtrace_test/multi_col_dwarf/Work/aiebu_config.json"
     -o "${CMAKE_CURRENT_BINARY_DIR}/multi_col_dwarf.elf"
-    -f fulldump
   WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}
   )
 
@@ -369,6 +367,55 @@ add_test(NAME "dtrace_multi_col_dwarf_result_compare"
 set_tests_properties("dtrace_multi_col_dwarf_result_compare" PROPERTIES
   DEPENDS "dtrace_multi_col_dwarf")
 
+# DWARF ELF single-column dtrace test (aie2ps_config) — single-column workload (uc0)
+# with jprobe, tracepoint, read_mem, write_mem, read_reg, mask_write_reg probes.
+# ELF is generated from test/dtrace_test/single_col_dwarf/Work/aiebu_config.json in-place.
+# Output format: json (result file: control_buffer_single_col_dwarf_dwarf.json).
+# kernel instance: DPU:dpu
+
+add_test(NAME "dtrace_generate_single_col_dwarf_dwarf"
+  COMMAND aiebu-asm
+    -t aie2ps_config
+    -j "${AIEBU_SOURCE_DIR}/test/dtrace_test/single_col_dwarf/Work/aiebu_config.json"
+    -o "${CMAKE_CURRENT_BINARY_DIR}/single_col_dwarf_dwarf.elf"
+  WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR})
+
+add_test(NAME "dtrace_single_col_dwarf_dwarf"
+  COMMAND ${DTRACE_TESTNAME}
+    "${AIEBU_SOURCE_DIR}/test/dtrace_test/single_col_dwarf"
+    "${CMAKE_CURRENT_BINARY_DIR}/control_buffer_single_col_dwarf_dwarf.dat"
+    "json"
+    "elf" "${CMAKE_CURRENT_BINARY_DIR}/single_col_dwarf_dwarf.elf" "DPU:dpu"
+  WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR})
+set_tests_properties("dtrace_single_col_dwarf_dwarf" PROPERTIES
+  DEPENDS "dtrace_generate_single_col_dwarf_dwarf")
+
+add_test(NAME "dtrace_single_col_dwarf_dwarf_md5sum"
+  COMMAND cmake -P "${AIEBU_SOURCE_DIR}/cmake/md5sum-compare.cmake"
+    "${CMAKE_CURRENT_BINARY_DIR}/control_buffer_single_col_dwarf_dwarf.dat"
+    "${AIEBU_SOURCE_DIR}/test/dtrace_test/single_col_dwarf/gold.md5"
+  WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR})
+set_tests_properties("dtrace_single_col_dwarf_dwarf_md5sum" PROPERTIES
+  DEPENDS "dtrace_single_col_dwarf_dwarf")
+
+add_test(NAME "dtrace_single_col_dwarf_dwarf_result_compare"
+  COMMAND ${CMAKE_COMMAND} -E compare_files --ignore-eol
+    "${CMAKE_CURRENT_BINARY_DIR}/control_buffer_single_col_dwarf_dwarf.json"
+    "${CMAKE_CURRENT_SOURCE_DIR}/single_col_dwarf/gold_result_single_col_dwarf_dwarf.json"
+  WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR})
+set_tests_properties("dtrace_single_col_dwarf_dwarf_result_compare" PROPERTIES
+  DEPENDS "dtrace_single_col_dwarf_dwarf")
+
+add_test(NAME "dtrace_single_col_dwarf_dwarf_py"
+  COMMAND ${DTRACE_TESTNAME}
+    "${AIEBU_SOURCE_DIR}/test/dtrace_test/single_col_dwarf"
+    "${CMAKE_CURRENT_BINARY_DIR}/control_buffer_single_col_dwarf_dwarf_py.dat"
+    "python"
+    "elf" "${CMAKE_CURRENT_BINARY_DIR}/single_col_dwarf_dwarf.elf" "DPU:dpu"
+  WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR})
+set_tests_properties("dtrace_single_col_dwarf_dwarf_py" PROPERTIES
+  DEPENDS "dtrace_generate_single_col_dwarf_dwarf")
+
 # Validate DWARF sections of generated ELFs with llvm-dwarfdump --verify (Linux only).
 # This provides an independent check that .debug_abbrev, .debug_info, .debug_line, and
 # .debug_str are spec-compliant — something the internal dwarf_reader cannot verify since
@@ -392,6 +439,12 @@ if (LLVM_DWARFDUMP)
     WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR})
   set_tests_properties("dwarf_verify_multi_col_dwarf" PROPERTIES
     DEPENDS "dtrace_generate_multi_col_dwarf")
+
+  add_test(NAME "dwarf_verify_single_col_dwarf_dwarf"
+    COMMAND ${LLVM_DWARFDUMP} --verify "${CMAKE_CURRENT_BINARY_DIR}/single_col_dwarf_dwarf.elf"
+    WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR})
+  set_tests_properties("dwarf_verify_single_col_dwarf_dwarf" PROPERTIES
+    DEPENDS "dtrace_generate_single_col_dwarf_dwarf")
 endif()
 
 add_subdirectory(duplicate_filename)

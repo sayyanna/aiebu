@@ -1,3 +1,4 @@
+.target aie2ps
 .attach_to_group 0
 START_JOB 0
         LOAD_PDI 0, @pdi
